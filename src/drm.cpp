@@ -334,6 +334,7 @@ static bool refresh_state( drm_t *drm )
 	}
 
 	// Add connectors which appeared
+	drm_log.infof("New connector count: %d", resources->count_connectors);
 	for (int i = 0; i < resources->count_connectors; i++) {
 		uint32_t conn_id = resources->connectors[i];
 
@@ -1295,7 +1296,7 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo )
 
 /* Prepares an atomic commit for the provided scene-graph. Returns false on
  * error or if the scene-graph can't be presented directly. */
-int drm_prepare( struct drm_t *drm, const struct FrameInfo_t *frameInfo )
+int drm_prepare_internal( struct drm_t *drm, const struct FrameInfo_t *frameInfo )
 {
 	drm_update_gamma_lut(drm);
 	drm_update_degamma_lut(drm);
@@ -1320,6 +1321,7 @@ int drm_prepare( struct drm_t *drm, const struct FrameInfo_t *frameInfo )
 
 		for ( auto &kv : drm->connectors ) {
 			struct connector *conn = &kv.second;
+			drm_log.infof("Setting CRTC_ID of connector with ID: %d", conn->id);
 			if ( add_connector_property( drm->req, conn, "CRTC_ID", 0 ) < 0 )
 				return false;
 		}
@@ -1419,6 +1421,30 @@ int drm_prepare( struct drm_t *drm, const struct FrameInfo_t *frameInfo )
 
 		if ( needs_modeset )
 			drm->needs_modeset = true;
+	}
+
+	return ret;
+}
+
+int drm_prepare( struct drm_t *drm, const struct FrameInfo_t *frameInfo )
+{
+	// Try again if we hit ENOENT, because it
+	// is probably just because we are on an MST DP,
+	// and there was some race with out of date feedback
+	// that meant we didn't register that the connector got lost.
+	// The interface is inherently race-y for us.
+	int nRetryCount = 0;
+
+	int ret = drm_prepare_internal( drm, frameInfo );
+	while ( ret == -ENOENT && drm->needs_modeset && nRetryCount < 128 )
+	{
+		drm_log.infof( "Hit ENOENT, retrying until connector state is back to being good... Attempt: %d", nRetryCount++ );
+
+		// Force refresh state here to make sure we are as
+		// up-to-date as possible with MST connector removal.
+		refresh_state( drm );
+
+		ret = drm_prepare_internal( drm, frameInfo );
 	}
 
 	return ret;
